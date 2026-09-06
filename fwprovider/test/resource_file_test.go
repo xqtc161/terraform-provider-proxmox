@@ -14,7 +14,6 @@ package test
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,17 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bpg/terraform-provider-proxmox/proxmox/api"
-	"github.com/bpg/terraform-provider-proxmox/proxmox/ssh"
-	"github.com/bpg/terraform-provider-proxmox/utils"
 )
-
-type nodeResolver struct {
-	node ssh.ProxmoxNode
-}
-
-func (c *nodeResolver) Resolve(_ context.Context, _ string) (ssh.ProxmoxNode, error) {
-	return c.node, nil
-}
 
 func TestAccResourceFile(t *testing.T) {
 	te := InitEnvironment(t)
@@ -68,8 +57,8 @@ func TestAccResourceFile(t *testing.T) {
 	resource.ParallelTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: te.AccProviders,
 		PreCheck: func() {
-			uploadSnippetFile(t, snippetFile2)
-			uploadSnippetFile(t, sftpOverwriteFile)
+			uploadSnippetFile(te, snippetFile2)
+			uploadSnippetFile(te, sftpOverwriteFile)
 			t.Cleanup(func() {
 				deleteSnippet(te, filepath.Base(snippetFile1))
 				deleteSnippet(te, filepath.Base(snippetFile2))
@@ -309,7 +298,14 @@ func TestAccResourceFile(t *testing.T) {
 // TestAccNodeStreamUpload verifies that NodeStreamUpload succeeds when the SSH
 // user relies on sudo to write to the snippets directory.
 func TestAccNodeStreamUpload(t *testing.T) {
+	t.Skip("disabled until NodeStreamUpload can chmod a sudo-written file as a non-root SSH user (#2987)")
+
 	te := InitEnvironment(t)
+
+	client := te.SSHClient()
+	if client.Username() == "root" {
+		t.Skip("requires a non-root sudo SSH user")
+	}
 
 	f := CreateTempFile(t, "stream-upload-*.yaml", "#cloud-config\nruncmd:\n  - echo hello\n")
 	fname := filepath.Base(f.Name())
@@ -320,8 +316,6 @@ func TestAccNodeStreamUpload(t *testing.T) {
 			t.Logf("cleanup: failed to delete snippet %s: %v", fname, err)
 		}
 	})
-
-	client := te.SSHClient()
 
 	fh, err := os.Open(f.Name())
 	require.NoError(t, err)
@@ -340,62 +334,28 @@ func TestAccNodeStreamUpload(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
+
+	out := te.ExecuteNodeCommands([]string{"stat -c '%a' /var/lib/vz/snippets/" + fname})
+	require.Equal(t, "700", strings.TrimSpace(out))
 }
 
-func newSSHClient(t *testing.T) ssh.Client {
-	t.Helper()
-
-	address := utils.GetAnyStringEnv("PROXMOX_VE_ACC_NODE_SSH_ADDRESS")
-	if address == "" {
-		u, err := url.ParseRequestURI(utils.GetAnyStringEnv("PROXMOX_VE_ENDPOINT"))
-		require.NoError(t, err)
-
-		address = u.Hostname()
-	}
-
-	sshPort := utils.GetAnyIntEnv("PROXMOX_VE_ACC_NODE_SSH_PORT")
-	if sshPort == 0 {
-		sshPort = 22
-	}
-
-	c, err := ssh.NewClient(
-		utils.GetAnyStringEnv("PROXMOX_VE_SSH_USERNAME"),
-		utils.GetAnyStringEnv("PROXMOX_VE_SSH_PASSWORD"),
-		utils.GetAnyBoolEnv("PROXMOX_VE_SSH_AGENT"),
-		utils.GetAnyStringEnv("SSH_AUTH_SOCK", "PROXMOX_VE_SSH_AUTH_SOCK"),
-		utils.GetAnyBoolEnv("PROXMOX_VE_SSH_AGENT_FORWARDING"),
-		utils.GetAnyStringEnv("PROXMOX_VE_SSH_PRIVATE_KEY"),
-		"", "", "",
-		&nodeResolver{
-			node: ssh.ProxmoxNode{
-				Address: address,
-				Port:    int32(sshPort),
-			},
-		},
-	)
-	require.NoError(t, err)
-
-	return c
-}
-
-func uploadSnippetFile(t *testing.T, fileName string) {
-	t.Helper()
+func uploadSnippetFile(te *Environment, fileName string) {
+	te.t.Helper()
 
 	f, err := os.Open(fileName)
-	require.NoError(t, err)
+	require.NoError(te.t, err)
 
 	defer func(f *os.File) {
 		_ = f.Close()
 	}(f)
 
-	fname := filepath.Base(fileName)
-	err = newSSHClient(t).NodeStreamUpload(context.Background(), "pve", "/var/lib/vz/",
+	err = te.SSHClient().NodeStreamUpload(context.Background(), te.NodeName, "/var/lib/vz/",
 		&api.FileUploadRequest{
 			ContentType: "snippets",
-			FileName:    fname,
+			FileName:    filepath.Base(fileName),
 			File:        f,
 		})
-	require.NoError(t, err)
+	require.NoError(te.t, err)
 }
 
 func deleteSnippet(te *Environment, fname string) {

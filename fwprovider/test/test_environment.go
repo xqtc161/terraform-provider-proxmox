@@ -289,11 +289,8 @@ func (e *Environment) NodeStorageClient() *storage.Client {
 	return &storage.Client{Client: e.NodeClient(), StorageName: e.DatastoreID}
 }
 
-// SSHClient returns an SSH client configured identically to the provider's SSH client:
-// PROXMOX_VE_SSH_USERNAME / PROXMOX_VE_SSH_PASSWORD are used first, falling back to the
-// stripped PROXMOX_VE_USERNAME / PROXMOX_VE_PASSWORD when the SSH-specific vars are unset.
-// All other SSH settings (agent, private key, socks5) mirror the provider's env var lookup.
-// The node resolver maps every node name to the configured test node SSH address and port.
+// SSHClient returns an SSH client for the test node using the provider's SSH environment variables,
+// falling back to the API user credentials when PROXMOX_VE_SSH_USERNAME / PROXMOX_VE_SSH_PASSWORD are unset.
 func (e *Environment) SSHClient() ssh.Client {
 	e.t.Helper()
 
@@ -307,23 +304,6 @@ func (e *Environment) SSHClient() ssh.Client {
 		sshPassword = utils.GetAnyStringEnv("PROXMOX_VE_PASSWORD")
 	}
 
-	address := utils.GetAnyStringEnv("PROXMOX_VE_ACC_NODE_SSH_ADDRESS")
-	if address == "" {
-		u, err := url.Parse(utils.GetAnyStringEnv("PROXMOX_VE_ENDPOINT"))
-		require.NoError(e.t, err)
-
-		address = u.Hostname()
-	}
-
-	port := int32(22)
-
-	if p := utils.GetAnyStringEnv("PROXMOX_VE_ACC_NODE_SSH_PORT"); p != "" {
-		v, err := strconv.ParseInt(p, 10, 32)
-		require.NoError(e.t, err)
-
-		port = int32(v)
-	}
-
 	client, err := ssh.NewClient(
 		sshUsername,
 		sshPassword,
@@ -334,7 +314,7 @@ func (e *Environment) SSHClient() ssh.Client {
 		utils.GetAnyStringEnv("PROXMOX_VE_SSH_SOCKS5_SERVER"),
 		utils.GetAnyStringEnv("PROXMOX_VE_SSH_SOCKS5_USERNAME"),
 		utils.GetAnyStringEnv("PROXMOX_VE_SSH_SOCKS5_PASSWORD"),
-		staticNodeResolver{node: ssh.ProxmoxNode{Address: address, Port: port}},
+		staticNodeResolver{node: e.nodeSSHTarget()},
 	)
 	require.NoError(e.t, err)
 
@@ -350,11 +330,8 @@ func (r staticNodeResolver) Resolve(context.Context, string) (ssh.ProxmoxNode, e
 	return r.node, nil
 }
 
-// ExecuteNodeCommands runs shell commands on the test node over SSH as the root API user
-// (PROXMOX_VE_USERNAME / PROXMOX_VE_PASSWORD) and returns the combined output. Connecting as
-// root avoids the restricted sudoers allowlist of the provider's SSH user, so privileged
-// commands such as `pct exec` work without sudo.
-func (e *Environment) ExecuteNodeCommands(commands []string) string {
+// nodeSSHTarget returns the SSH address and port of the test node.
+func (e *Environment) nodeSSHTarget() ssh.ProxmoxNode {
 	e.t.Helper()
 
 	address := utils.GetAnyStringEnv("PROXMOX_VE_ACC_NODE_SSH_ADDRESS")
@@ -374,6 +351,16 @@ func (e *Environment) ExecuteNodeCommands(commands []string) string {
 		port = int32(v)
 	}
 
+	return ssh.ProxmoxNode{Address: address, Port: port}
+}
+
+// ExecuteNodeCommands runs shell commands on the test node over SSH as the root API user
+// (PROXMOX_VE_USERNAME / PROXMOX_VE_PASSWORD) and returns the combined output. Connecting as
+// root avoids the restricted sudoers allowlist of the provider's SSH user, so privileged
+// commands such as `pct exec` work without sudo.
+func (e *Environment) ExecuteNodeCommands(commands []string) string {
+	e.t.Helper()
+
 	// Strip the realm from "root@pam" to get the SSH login name.
 	username := strings.Split(utils.GetAnyStringEnv("PROXMOX_VE_USERNAME"), "@")[0]
 
@@ -383,7 +370,7 @@ func (e *Environment) ExecuteNodeCommands(commands []string) string {
 		false, "", false,
 		"",
 		"", "", "",
-		staticNodeResolver{node: ssh.ProxmoxNode{Address: address, Port: port}},
+		staticNodeResolver{node: e.nodeSSHTarget()},
 	)
 	require.NoError(e.t, err)
 
